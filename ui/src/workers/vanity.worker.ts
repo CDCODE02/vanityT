@@ -4,46 +4,13 @@ import init, { VanityEngine } from '../../../engine/pkg/vanity_engine';
 let engine: VanityEngine | null = null;
 let isInitialized = false;
 
-// Convert hex string to byte array and mask
-function parseHexPattern(hexStr: string): { bytes: Uint8Array, mask: Uint8Array } {
-  // Strip 0x if present
-  let cleanStr = hexStr.toLowerCase().replace(/^0x/, '');
-  const isOdd = cleanStr.length % 2 !== 0;
-  
-  if (isOdd) {
-    cleanStr += '0'; // Pad for parsing, the mask will ignore the padded part
-  }
-  
-  const byteLen = cleanStr.length / 2;
-  const bytes = new Uint8Array(byteLen);
-  const mask = new Uint8Array(byteLen);
-  
-  for (let i = 0; i < byteLen; i++) {
-    bytes[i] = parseInt(cleanStr.substring(i * 2, i * 2 + 2), 16);
-    // If it was odd and this is the last byte, only mask the upper nibble
-    if (isOdd && i === byteLen - 1) {
-      mask[i] = 0xF0;
-      bytes[i] = bytes[i] & 0xF0; // Ensure lower nibble is 0 for matching
-    } else {
-      mask[i] = 0xFF;
-    }
-  }
-  
-  return { bytes, mask };
-}
-
 self.onmessage = async (e: MessageEvent) => {
   const { type, payload } = e.data;
 
   if (type === 'INIT') {
     try {
       await init();
-      
-      // Seed the CSPRNG securely using the browser's crypto API
-      const seed = new Uint8Array(32);
-      crypto.getRandomValues(seed);
-      
-      engine = new VanityEngine(seed);
+      engine = new VanityEngine();
       isInitialized = true;
       self.postMessage({ type: 'INIT_DONE' });
     } catch (err) {
@@ -57,10 +24,6 @@ self.onmessage = async (e: MessageEvent) => {
 
     const { prefix, suffix, sharedBuffer, batchSize = 5000 } = payload;
     const flagArray = new Uint8Array(sharedBuffer);
-    
-    // Parse patterns
-    const prefixData = parseHexPattern(prefix || '');
-    const suffixData = parseHexPattern(suffix || '');
 
     let attempts = 0;
     
@@ -68,10 +31,8 @@ self.onmessage = async (e: MessageEvent) => {
       // Tight generation loop
       while (Atomics.load(flagArray, 0) === 0) {
         const result = engine.search_batch(
-          prefixData.bytes,
-          prefixData.mask,
-          suffixData.bytes,
-          suffixData.mask,
+          prefix || '',
+          suffix || '',
           batchSize
         );
 
