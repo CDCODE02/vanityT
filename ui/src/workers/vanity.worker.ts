@@ -4,6 +4,23 @@ import init, { VanityEngine } from '../../../engine/pkg/vanity_engine';
 let engine: VanityEngine | null = null;
 let isInitialized = false;
 
+// Convert hex string to byte array
+function parseHexPattern(hexStr: string): Uint8Array {
+  let cleanStr = hexStr.toLowerCase().replace(/^0x/, '');
+  if (cleanStr.length % 2 !== 0) {
+    cleanStr += '0'; // Pad to even length
+  }
+  
+  const byteLen = cleanStr.length / 2;
+  const bytes = new Uint8Array(byteLen);
+  
+  for (let i = 0; i < byteLen; i++) {
+    bytes[i] = parseInt(cleanStr.substring(i * 2, i * 2 + 2), 16);
+  }
+  
+  return bytes;
+}
+
 self.onmessage = async (e: MessageEvent) => {
   const { type, payload } = e.data;
 
@@ -22,8 +39,12 @@ self.onmessage = async (e: MessageEvent) => {
       return;
     }
 
-    const { prefix, suffix, sharedBuffer, batchSize = 5000 } = payload;
+    const { prefix, suffix, sharedBuffer, batchSize = 1000 } = payload;
     const flagArray = new Uint8Array(sharedBuffer);
+    
+    // Parse to byte arrays once outside the loop
+    const prefixBytes = parseHexPattern(prefix || '');
+    const suffixBytes = parseHexPattern(suffix || '');
 
     let attempts = 0;
     
@@ -31,15 +52,14 @@ self.onmessage = async (e: MessageEvent) => {
       // Tight generation loop
       while (Atomics.load(flagArray, 0) === 0) {
         const result = engine.search_batch(
-          prefix || '',
-          suffix || '',
+          prefixBytes,
+          suffixBytes,
           batchSize
         );
 
         attempts += batchSize;
 
         if (result) {
-          // Double check flag in case another worker found it exactly at the same time
           if (Atomics.compareExchange(flagArray, 0, 0, 1) === 0) {
             self.postMessage({
               type: 'FOUND',
@@ -53,14 +73,12 @@ self.onmessage = async (e: MessageEvent) => {
           break;
         }
 
-        // Report progress every 50k attempts to avoid flooding the message queue
         if (attempts >= 50000) {
           self.postMessage({ type: 'PROGRESS', attempts });
           attempts = 0;
         }
       }
       
-      // If we exit loop and have remaining attempts to report
       if (attempts > 0 && Atomics.load(flagArray, 0) !== 0) {
          self.postMessage({ type: 'PROGRESS', attempts });
       }

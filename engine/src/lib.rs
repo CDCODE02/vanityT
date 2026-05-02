@@ -24,39 +24,6 @@ impl MatchResult {
     }
 }
 
-// Convert hex string to byte array and mask
-fn parse_hex_pattern(hex_str: &str) -> (Vec<u8>, Vec<u8>) {
-    let mut clean_str = hex_str.to_lowercase();
-    if clean_str.starts_with("0x") {
-        clean_str = clean_str[2..].to_string();
-    }
-    
-    let is_odd = clean_str.len() % 2 != 0;
-    if is_odd {
-        clean_str.push('0'); // Pad for parsing
-    }
-    
-    let byte_len = clean_str.len() / 2;
-    let mut bytes = vec![0u8; byte_len];
-    let mut mask = vec![0u8; byte_len];
-    
-    for i in 0..byte_len {
-        let byte_str = &clean_str[i * 2..i * 2 + 2];
-        let byte = u8::from_str_radix(byte_str, 16).unwrap_or(0);
-        
-        bytes[i] = byte;
-        
-        if is_odd && i == byte_len - 1 {
-            mask[i] = 0xF0;
-            bytes[i] = bytes[i] & 0xF0;
-        } else {
-            mask[i] = 0xFF;
-        }
-    }
-    
-    (bytes, mask)
-}
-
 #[wasm_bindgen]
 pub struct VanityEngine;
 
@@ -70,15 +37,12 @@ impl VanityEngine {
     #[wasm_bindgen]
     pub fn search_batch(
         &self,
-        prefix: &str,
-        suffix: &str,
+        prefix: &[u8],
+        suffix: &[u8],
         batch_size: usize,
     ) -> Option<MatchResult> {
-        let (prefix_bytes, prefix_mask) = parse_hex_pattern(prefix);
-        let (suffix_bytes, suffix_mask) = parse_hex_pattern(suffix);
-        
-        let prefix_len = prefix_bytes.len();
-        let suffix_len = suffix_bytes.len();
+        let prefix_len = prefix.len();
+        let suffix_len = suffix.len();
 
         let mut private_key = [0u8; 32];
         let mut rng = rand::thread_rng();
@@ -103,7 +67,7 @@ impl VanityEngine {
 
             let mut is_match = true;
             for i in 0..prefix_len {
-                if (address[i] & prefix_mask[i]) != prefix_bytes[i] {
+                if address[i] != prefix[i] {
                     is_match = false;
                     break;
                 }
@@ -113,7 +77,7 @@ impl VanityEngine {
                 let offset = 20 - suffix_len;
                 if offset >= 0 {
                     for i in 0..suffix_len {
-                        if (address[offset + i] & suffix_mask[i]) != suffix_bytes[i] {
+                        if address[offset + i] != suffix[i] {
                             is_match = false;
                             break;
                         }
