@@ -28,15 +28,31 @@ export function useVanityEngine() {
   const totalAttemptsRef = useRef<number>(0);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Initialize workers
+  // Initialize workers once
   useEffect(() => {
-    // Only run in browser
     if (typeof window === 'undefined') return;
 
-    const numWorkers = Math.max(1, (navigator.hardwareConcurrency || 4) - 1); // leave 1 core for UI
+    // Use ALL logical CPU threads
+    const numWorkers = navigator.hardwareConcurrency || 4;
     
     for (let i = 0; i < numWorkers; i++) {
       const worker = new Worker(new URL('../workers/vanity.worker.ts', import.meta.url), { type: 'module' });
+      
+      worker.onmessage = (e) => {
+        const { type, attempts, result: foundResult, error } = e.data;
+        if (type === 'PROGRESS') {
+          totalAttemptsRef.current += attempts;
+        } else if (type === 'FOUND') {
+          setResult(foundResult);
+          setStats(prev => ({ ...prev, status: 'found' }));
+          stopSearch();
+        } else if (type === 'ERROR') {
+          console.error(`Worker error:`, error);
+          setStats(prev => ({ ...prev, status: 'error', errorMessage: error }));
+          stopSearch();
+        }
+      };
+
       worker.postMessage({ type: 'INIT' });
       workersRef.current.push(worker);
     }
@@ -47,69 +63,9 @@ export function useVanityEngine() {
     };
   }, []);
 
-  const startSearch = useCallback((prefix: string, suffix: string) => {
-    if (workersRef.current.length === 0) return;
-
-    // Reset stats
-    startTimeRef.current = performance.now();
-    totalAttemptsRef.current = 0;
-    setResult(null);
-    setStats({
-      attemptsPerSecond: 0,
-      totalAttempts: 0,
-      elapsedMs: 0,
-      status: 'searching'
-    });
-
-    // Create shared stop flag
-    const buffer = new SharedArrayBuffer(1);
-    const flagArray = new Uint8Array(buffer);
-    flagArray[0] = 0; // 0 = running, 1 = stop
-    sharedBufferRef.current = buffer;
-
-    // Setup message handlers and start workers
-    workersRef.current.forEach(worker => {
-      worker.onmessage = (e) => {
-        const { type, payload, attempts, result: foundResult, error } = e.data;
-        
-        if (type === 'PROGRESS') {
-          totalAttemptsRef.current += attempts;
-        } else if (type === 'FOUND') {
-          setResult(foundResult);
-          setStats(prev => ({ ...prev, status: 'found' }));
-          stopSearch();
-        } else if (type === 'ERROR') {
-          console.error("Worker error:", error);
-          setStats(prev => ({ ...prev, status: 'error', errorMessage: error }));
-          stopSearch();
-        }
-      };
-
-      worker.postMessage({
-        type: 'START',
-        payload: { prefix, suffix, sharedBuffer: buffer, batchSize: 10000 }
-      });
-    });
-
-    // Stats update timer
-    timerRef.current = setInterval(() => {
-      const now = performance.now();
-      const elapsed = now - startTimeRef.current;
-      const total = totalAttemptsRef.current;
-      
-      setStats(prev => ({
-        ...prev,
-        totalAttempts: total,
-        elapsedMs: elapsed,
-        attemptsPerSecond: elapsed > 0 ? Math.floor((total / elapsed) * 1000) : 0
-      }));
-    }, 100);
-
-  }, []);
-
   const stopSearch = useCallback(() => {
     if (sharedBufferRef.current) {
-      const flagArray = new Uint8Array(sharedBufferRef.current);
+      const flagArray = new Int32Array(sharedBufferRef.current);
       Atomics.store(flagArray, 0, 1); // Signal all workers to stop
     }
     
@@ -123,6 +79,58 @@ export function useVanityEngine() {
       status: prev.status === 'searching' ? 'stopped' : prev.status
     }));
   }, []);
+
+  const startSearch = useCallback((prefix: string, suffix: string) => {
+    if (workersRef.current.length === 0) return;
+
+    startTimeRef.current = performance.now();
+    totalAttemptsRef.current = 0;
+    setResult(null);
+    setStats({
+      attemptsPerSecond: 0,
+      totalAttempts: 0,
+      elapsedMs: 0,
+      status: 'searching'
+    });
+
+    // Check for SharedArrayBuffer support (requires COOP/COEP headers)
+    if (typeof SharedArrayBuffer === 'undefined') {
+      setStats(prev => ({ 
+        ...prev, 
+        status: 'error', 
+        errorMessage: 'SharedArrayBuffer is not supported. Ensure the page is cross-origin isolated.' 
+      }));
+      return;
+    }
+
+    // Create shared stop flag (Int32Array is better for Atomics)
+    const buffer = new SharedArrayBuffer(4);
+    const flagArray = new Int32Array(buffer);
+    flagArray[0] = 0; // 0 = running, 1 = stop
+    sharedBufferRef.current = buffer;
+
+    workersRef.current.forEach(worker => {
+      worker.postMessage({
+        type: 'START',
+        payload: { prefix, suffix, sharedBuffer: buffer, batchSize: 50000 }
+      });
+    });
+
+    // Throttled stats update (250ms)
+    timerRef.current = setInterval(() => {
+      const now = performance.now();
+      const elapsed = now - startTimeRef.current;
+      const total = totalAttemptsRef.current;
+      
+      setStats(prev => ({
+        ...prev,
+        totalAttempts: total,
+        elapsedMs: elapsed,
+        attemptsPerSecond: elapsed > 0 ? Math.floor((total / elapsed) * 1000) : 0
+      }));
+    }, 250);
+
+  }, [stopSearch]);
 
   return { startSearch, stopSearch, stats, result, workerCount: workersRef.current.length };
 }

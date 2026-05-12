@@ -149,12 +149,18 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Live Stats Panel */}
-        <div className="glass-panel p-6 flex flex-col h-full">
-          <h2 className="text-xl font-semibold mb-6 flex items-center">
-            <span className="bg-blue-500 w-1.5 h-6 rounded-full mr-3"></span>
-            Live Telemetry
-          </h2>
+          {/* Live Stats Panel */}
+          <div className="glass-panel p-6 flex flex-col h-full">
+            <h2 className="text-xl font-semibold mb-6 flex items-center">
+              <span className="bg-blue-500 w-1.5 h-6 rounded-full mr-3"></span>
+              Live Telemetry
+            </h2>
+
+            {stats.status === 'error' && (
+              <div className="mb-6 p-4 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 text-sm">
+                <strong>Engine Error:</strong> {stats.errorMessage}
+              </div>
+            )}
 
           <div className="grid grid-cols-2 gap-4 mb-6">
             <div className="bg-slate-900/50 border border-slate-700/50 rounded-xl p-4">

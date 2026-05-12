@@ -1,7 +1,16 @@
+//! # VanityEngine Compute Core
+//! 
+//! This module implements a high-performance vanity address generator for EVM chains.
+//! 
+//! ## Optimizations
+//! - **Incremental Point Addition:** Uses `P = P + G` instead of full scalar multiplication for each attempt.
+//! - **Zero Heap Allocations:** The hot loop is free of heap allocations to maximize throughput.
+//! - **Direct Byte Matching:** Prefix/suffix comparisons are performed on raw byte arrays.
+//! - **Keccak Reuse:** Reuses the hasher state to minimize initialization overhead.
+
 use wasm_bindgen::prelude::*;
 use rand::RngCore;
-use k256::ecdsa::SigningKey;
-use k256::elliptic_curve::sec1::ToEncodedPoint;
+use k256::{ProjectivePoint, Scalar, elliptic_curve::{sec1::ToEncodedPoint, PrimeField}, FieldBytes};
 use sha3::{Digest, Keccak256};
 use zeroize::Zeroize;
 
@@ -25,13 +34,17 @@ impl MatchResult {
 }
 
 #[wasm_bindgen]
-pub struct VanityEngine;
+pub struct VanityEngine {
+    generator: ProjectivePoint,
+}
 
 #[wasm_bindgen]
 impl VanityEngine {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        Self
+        Self {
+            generator: ProjectivePoint::GENERATOR,
+        }
     }
 
     #[wasm_bindgen]
@@ -41,66 +54,108 @@ impl VanityEngine {
         suffix: &[u8],
         batch_size: usize,
     ) -> Option<MatchResult> {
+        let mut rng = rand::thread_rng();
+        let mut priv_bytes = [0u8; 32];
+        rng.fill_bytes(&mut priv_bytes);
+
+        // Start with a random scalar
+        let mut scalar: Scalar = match Scalar::from_repr(*FieldBytes::from_slice(&priv_bytes)).into() {
+            Some(s) => s,
+            None => return None, // Extremely unlikely
+        };
+
+        let mut current_point: ProjectivePoint = self.generator * scalar;
+        let step = self.generator;
+
         let prefix_len = prefix.len();
         let suffix_len = suffix.len();
 
-        let mut private_key = [0u8; 32];
-        let mut rng = rand::thread_rng();
-
+        let mut hasher = Keccak256::new();
+        
         for _ in 0..batch_size {
-            rng.fill_bytes(&mut private_key);
+            // Convert to affine to get bytes
+            let affine = current_point.to_affine();
+            let encoded = affine.to_encoded_point(false);
+            let pub_bytes = encoded.as_bytes(); // [0x04, x_bytes, y_bytes]
 
-            let signing_key = match SigningKey::from_slice(&private_key) {
-                Ok(k) => k,
-                Err(_) => continue, // Invalid scalar, very rare
-            };
-            
-            let verifying_key = signing_key.verifying_key();
-            let encoded_point = verifying_key.to_encoded_point(false);
-            let pubkey_bytes = encoded_point.as_bytes(); // first byte is 0x04
+            // Keccak256 of the 64-byte pubkey (excluding the 0x04 prefix)
+            hasher.update(&pub_bytes[1..]);
+            let hash = hasher.finalize_reset();
 
-            let mut hasher = Keccak256::new();
-            hasher.update(&pubkey_bytes[1..]);
-            let hash = hasher.finalize();
-
+            // Address is the last 20 bytes of the hash
             let address = &hash[12..32];
 
+            // Byte-level matching
             let mut is_match = true;
-            for i in 0..prefix_len {
-                if address[i] != prefix[i] {
-                    is_match = false;
-                    break;
+            
+            // Prefix check
+            if prefix_len > 0 {
+                for i in 0..prefix_len {
+                    if address[i] != prefix[i] {
+                        is_match = false;
+                        break;
+                    }
+                }
+            }
+
+            // Suffix check
+            if is_match && suffix_len > 0 {
+                let offset = 20 - suffix_len;
+                for i in 0..suffix_len {
+                    if address[offset + i] != suffix[i] {
+                        is_match = false;
+                        break;
+                    }
                 }
             }
 
             if is_match {
-                let offset = 20 - suffix_len;
-                if offset >= 0 {
-                    for i in 0..suffix_len {
-                        if address[offset + i] != suffix[i] {
-                            is_match = false;
-                            break;
-                        }
-                    }
-                } else {
-                    is_match = false;
-                }
-
-                if is_match {
-                    let priv_hex = format!("0x{}", hex::encode(private_key));
-                    let addr_hex = format!("0x{}", hex::encode(address));
-                    
-                    private_key.zeroize();
-                    
-                    return Some(MatchResult {
-                        private_key: priv_hex,
-                        address: addr_hex,
-                    });
-                }
+                let priv_hex = format!("0x{}", hex::encode(scalar.to_bytes()));
+                let addr_hex = format!("0x{}", hex::encode(address));
+                
+                priv_bytes.zeroize();
+                return Some(MatchResult {
+                    private_key: priv_hex,
+                    address: addr_hex,
+                });
             }
+
+            // Increment
+            current_point += step;
+            scalar += Scalar::ONE;
         }
 
-        private_key.zeroize();
+        priv_bytes.zeroize();
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use k256::elliptic_curve::sec1::ToEncodedPoint;
+
+    #[test]
+    fn test_incremental_correctness() {
+        let _engine = VanityEngine::new();
+        let generator = ProjectivePoint::GENERATOR;
+        
+        let mut priv_bytes = [0u8; 32];
+        priv_bytes[31] = 1; // scalar = 1
+        let mut scalar: Scalar = Scalar::from_repr(*FieldBytes::from_slice(&priv_bytes)).unwrap();
+        
+        let mut current_point: ProjectivePoint = generator * scalar;
+        
+        for _ in 0..100 {
+            let affine = current_point.to_affine();
+            let _encoded = affine.to_encoded_point(false);
+            
+            // Check against full multiplication
+            let expected_point = generator * scalar;
+            assert_eq!(affine, expected_point.to_affine());
+            
+            current_point += generator;
+            scalar += Scalar::ONE;
+        }
     }
 }
