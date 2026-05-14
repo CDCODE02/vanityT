@@ -6,6 +6,16 @@ use sha3::{Digest, Keccak256};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+use std::io::{Write, stdout};
+
+// Cryptography imports
+use aes_gcm::{
+    aead::{Aead, AeadCore, KeyInit},
+    Aes256Gcm, Nonce
+};
+use pbkdf2::pbkdf2_hmac;
+use sha2::Sha256;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -20,8 +30,49 @@ struct Args {
     batch_size: usize,
 }
 
+fn encrypt_payload(password: &str, plaintext: &str) -> String {
+    let mut rng = rand::thread_rng();
+
+    // 1. Generate 16-byte salt
+    let mut salt = [0u8; 16];
+    rng.fill_bytes(&mut salt);
+
+    // 2. Derive 32-byte (256-bit) key using PBKDF2-HMAC-SHA256 (100,000 iterations)
+    let mut key_bytes = [0u8; 32];
+    pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt, 100_000, &mut key_bytes);
+
+    // 3. Initialize AES-256-GCM
+    let cipher = Aes256Gcm::new(&key_bytes.into());
+
+    // 4. Generate 12-byte nonce (IV)
+    let nonce = Aes256Gcm::generate_nonce(&mut rng);
+
+    // 5. Encrypt the plaintext (AES-GCM automatically appends the 16-byte auth tag)
+    let ciphertext = cipher.encrypt(&nonce, plaintext.as_bytes()).expect("Encryption failed!");
+
+    // 6. Combine: [Salt (16)] + [Nonce (12)] + [Ciphertext + Tag]
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&salt);
+    payload.extend_from_slice(&nonce);
+    payload.extend_from_slice(&ciphertext);
+
+    // 7. Base64 encode the final binary payload
+    BASE64.encode(payload)
+}
+
 fn main() {
     let args = Args::parse();
+
+    // Prompt for encryption password securely
+    print!("🔒 Enter an encryption password for the output: ");
+    stdout().flush().unwrap();
+    let password = rpassword::read_password().expect("Failed to read password");
+    
+    if password.trim().is_empty() {
+        println!("❌ Password cannot be empty. Security is mandatory!");
+        std::process::exit(1);
+    }
+
     let prefix_bytes = hex::decode(args.prefix.trim_start_matches("0x")).expect("Invalid prefix hex");
     let suffix_bytes = hex::decode(args.suffix.trim_start_matches("0x")).expect("Invalid suffix hex");
 
@@ -59,6 +110,8 @@ fn main() {
         }
     });
 
+    let pass_clone = password.clone();
+
     // Parallel search
     (0..rayon::current_num_threads()).into_par_iter().for_each(|_| {
         let mut rng = rand::thread_rng();
@@ -69,12 +122,12 @@ fn main() {
             let mut priv_bytes = [0u8; 32];
             rng.fill_bytes(&mut priv_bytes);
             
-            let mut scalar = match Scalar::from_repr(*FieldBytes::from_slice(&priv_bytes)).into() {
+            let mut scalar: Scalar = match Scalar::from_repr(*FieldBytes::from_slice(&priv_bytes)).into() {
                 Some(s) => s,
                 None => continue,
             };
 
-            let mut current_point = ProjectivePoint::GENERATOR * scalar;
+            let mut current_point: ProjectivePoint = ProjectivePoint::GENERATOR * scalar;
 
             for _ in 0..args.batch_size {
                 if !running.load(Ordering::Relaxed) { break; }
@@ -91,15 +144,30 @@ fn main() {
                 let suffix_match = address.ends_with(&suffix_bytes);
 
                 if prefix_match && suffix_match {
-                    running.store(false, Ordering::SeqCst);
-                    let elapsed = start_time.elapsed();
-                    
-                    println!("\n✨ MATCH FOUND! ✨");
-                    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                    println!("📍 Address:     0x{}", hex::encode(address));
-                    println!("🔑 Private Key: 0x{}", hex::encode(scalar.to_bytes()));
-                    println!("⏱️  Time:        {:?}", elapsed);
-                    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                    // Only one thread should enter here due to the atomic flag, but just in case
+                    if running.swap(false, Ordering::SeqCst) {
+                        let elapsed = start_time.elapsed();
+                        let raw_pk = format!("0x{}", hex::encode(scalar.to_bytes()));
+                        let addr_hex = format!("0x{}", hex::encode(address));
+
+                        // Encrypt the private key!
+                        let encrypted_pk = encrypt_payload(&pass_clone, &raw_pk);
+                        
+                        println!("\n✨ MATCH FOUND! ✨");
+                        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                        println!("📍 Address:       {}", addr_hex);
+                        println!("🔐 Encrypted PK:  {}", encrypted_pk);
+                        println!("⏱️  Time:          {:?}", elapsed);
+                        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                        println!("⚠️  Copy the Encrypted PK and use your local Web UI Decrypter to reveal it safely.");
+                        
+                        // Save to file as backup
+                        if let Ok(mut file) = std::fs::File::create("match_found.txt") {
+                            let _ = writeln!(file, "Address: {}", addr_hex);
+                            let _ = writeln!(file, "Encrypted PK: {}", encrypted_pk);
+                            println!("💾 Saved securely to match_found.txt");
+                        }
+                    }
                     return;
                 }
 

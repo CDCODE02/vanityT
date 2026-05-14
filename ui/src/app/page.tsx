@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { HexInput } from '@/components/HexInput';
 import { DifficultyBadge } from '@/components/DifficultyBadge';
+import { DecrypterTool } from '@/components/DecrypterTool';
 import { useVanityEngine } from '@/hooks/useVanityEngine';
 import { Play, Square, Copy, Download, Cpu, Clock, Activity, ShieldCheck } from 'lucide-react';
 
@@ -256,6 +257,11 @@ export default function Home() {
             )}
           </div>
         </div>
+      </div>
+      
+      {/* Offline Decrypter Tool */}
+      <div className="mt-8">
+        <DecrypterTool />
       </div>
     </main>
   );
