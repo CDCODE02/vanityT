@@ -36,3 +36,6 @@ engine/pkg/
 .idea/
 *.swp
 *.log
+
+# Sensitive output
+match_found.txt
