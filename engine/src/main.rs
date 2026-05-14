@@ -60,6 +60,43 @@ fn encrypt_payload(password: &str, plaintext: &str) -> String {
     BASE64.encode(payload)
 }
 
+fn matches_hex_prefix(address: &[u8], hex_prefix: &str) -> bool {
+    let bytes = hex_prefix.as_bytes();
+    for (i, &c) in bytes.iter().enumerate() {
+        let addr_byte = address[i / 2];
+        let nibble = if i % 2 == 0 { addr_byte >> 4 } else { addr_byte & 0x0F };
+        let expected = match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            b'A'..=b'F' => c - b'A' + 10,
+            _ => return false,
+        };
+        if nibble != expected { return false; }
+    }
+    true
+}
+
+fn matches_hex_suffix(address: &[u8], hex_suffix: &str) -> bool {
+    let bytes = hex_suffix.as_bytes();
+    let addr_len = address.len();
+    let suffix_len = bytes.len();
+    for i in 0..suffix_len {
+        let char_idx = suffix_len - 1 - i;
+        let c = bytes[char_idx];
+        let nibble_idx = (addr_len * 2) - 1 - i;
+        let addr_byte = address[nibble_idx / 2];
+        let nibble = if nibble_idx % 2 == 0 { addr_byte >> 4 } else { addr_byte & 0x0F };
+        let expected = match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            b'A'..=b'F' => c - b'A' + 10,
+            _ => return false,
+        };
+        if nibble != expected { return false; }
+    }
+    true
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -73,12 +110,12 @@ fn main() {
         std::process::exit(1);
     }
 
-    let prefix_bytes = hex::decode(args.prefix.trim_start_matches("0x")).expect("Invalid prefix hex");
-    let suffix_bytes = hex::decode(args.suffix.trim_start_matches("0x")).expect("Invalid suffix hex");
+    let prefix_str = args.prefix.trim_start_matches("0x").to_lowercase();
+    let suffix_str = args.suffix.trim_start_matches("0x").to_lowercase();
 
     println!("🚀 Starting high-performance native search...");
-    println!("🎯 Target Prefix: 0x{}", hex::encode(&prefix_bytes));
-    println!("🎯 Target Suffix: 0x{}", hex::encode(&suffix_bytes));
+    println!("🎯 Target Prefix: 0x{}", prefix_str);
+    println!("🎯 Target Suffix: 0x{}", suffix_str);
     println!("🧵 Using all {} logical cores", rayon::current_num_threads());
 
     let running = Arc::new(AtomicBool::new(true));
@@ -111,6 +148,8 @@ fn main() {
     });
 
     let pass_clone = password.clone();
+    let pref_clone = prefix_str.clone();
+    let suff_clone = suffix_str.clone();
 
     // Parallel search
     (0..rayon::current_num_threads()).into_par_iter().for_each(|_| {
@@ -140,8 +179,8 @@ fn main() {
                 let hash = hasher.finalize_reset();
                 let address = &hash[12..32];
 
-                let prefix_match = address.starts_with(&prefix_bytes);
-                let suffix_match = address.ends_with(&suffix_bytes);
+                let prefix_match = matches_hex_prefix(address, &pref_clone);
+                let suffix_match = matches_hex_suffix(address, &suff_clone);
 
                 if prefix_match && suffix_match {
                     // Only one thread should enter here due to the atomic flag, but just in case
